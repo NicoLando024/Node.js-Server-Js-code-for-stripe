@@ -1,0 +1,678 @@
+# -----> removed for privacy
+NODE.JS CODE
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const stripe = require('stripe')('#');
+const nodemailer = require('nodemailer');
+
+const app = express();
+const port = process.env.PORT || 10469;
+
+app.use(bodyParser.json());
+
+// Configurazione CORS
+const corsOptions = {
+  origin: ['https://southgardamotorsport.it'],
+};
+app.use(cors(corsOptions));
+
+// Middleware per gestire le richieste CORS
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', 'https://southgardamotorsport.it');
+  next();
+});
+
+app.get('/', (req, res) => {
+  res.send('Il server Stripe-Mail è attivo!');
+});
+
+// Creazione dei trasportatori di posta
+const mainTransporter = nodemailer.createTransport({
+  host: 'mail.southgardamotorsport.it',
+  port: 465,
+  secure: true,
+  auth: {
+    user: '#',
+    pass: '#'
+  }
+});
+
+const returnSupportTransporter = nodemailer.createTransport({
+  host: 'mail.southgardamotorsport.it',
+  port: 465,
+  secure: true,
+  auth: {
+    user: '#',
+    pass: '#'
+  }
+});
+
+const feedbackTransporter = nodemailer.createTransport({
+  host: 'mail.southgardamotorsport.it',
+  port: 465,
+  secure: true,
+  auth: {
+    user: '#',
+    pass: '#'
+  }
+});
+
+// Funzione per inviare email
+async function sendEmail(transporter, email, subject, text, attachments = []) {
+  try {
+    const mailOptions = {
+      from: transporter.options.auth.user,
+      to: email,
+      subject: subject,
+      html: `
+        <p>${text}</p>
+        <img src="cid:signature" alt="Signature">
+        <p>info: +39 348 5928213</p>
+        <p>e-mail: info@southgardamotorsport.it</p>
+        <p>P. IVA 02719250207 - C.F. SRNFNC01D05C312J</p>
+      `,
+      attachments: [
+        ...attachments,
+        {
+          filename: 'logo.jpg',
+          path: 'logo.jpg',
+          cid: 'signature'
+        }
+      ]
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('Email inviata con successo:', info.response);
+    return info.response;
+  } catch (error) {
+    console.error('Errore durante l\'invio dell\'email:', error);
+    throw error;
+  }
+}
+
+// Endpoint per l'invio dei dati del carrello
+app.post('/send-cart-data', async (req, res) => {
+  const { formData, cartData, numeroOrdine } = req.body;
+  console.log('Dati del carrello ricevuti:', formData, cartData, numeroOrdine);
+
+  const { name, email, address, city, zip } = formData;
+
+  if (!name || !email || !address || !city || !zip || cartData.length === 0) {
+    return res.status(400).json({ error: 'Compila tutti i campi del form e aggiungi almeno un articolo al carrello.' });
+  }
+
+  const destinatarioFisso = '#';
+  const oggetto = `Nuovo ordine da ${name}`;
+  const testo = `Dettagli dell'ordine:\nNumero d'ordine: ${numeroOrdine}\nNome: ${name}\nEmail: ${email}\nIndirizzo: ${address}\nCittà: ${city}\nCAP: ${zip}\n\nDettagli del carrello:\n${JSON.stringify(cartData, null, 2)}`;
+
+  try {
+    await sendEmail(mainTransporter, destinatarioFisso, oggetto, testo);
+    res.status(200).json({ message: 'Email inviata con successo!' });
+  } catch (error) {
+    res.status(500).json({ error: 'Errore durante l\'invio dell\'email. Riprova più tardi.' });
+  }
+});
+
+// Endpoint per l'invio dell'email
+app.post('/send-email', async (req, res) => {
+  const { subject, text } = req.body;
+  const email = 'centralino@southgardamotorsport.it';
+
+  try {
+    await sendEmail(mainTransporter, email, subject, text);
+    res.status(200).json({ message: 'Email inviata con successo!' });
+  } catch (error) {
+    res.status(500).json({ error: 'Errore durante l\'invio dell\'email. Riprova più tardi.' });
+  }
+});
+
+// Endpoint per la creazione del prezzo totale
+app.post('/create-total-price', async (req, res) => {
+  try {
+    const { ricambi } = req.body;
+    const totalPrice = ricambi.reduce((acc, ricambio) => {
+      return acc + (ricambio.prezzo * 100);
+    }, 0);
+    const price = await stripe.prices.create({
+      currency: 'eur',
+      unit_amount: totalPrice,
+      product_data: {
+        name: 'Ordine di ricambi',
+      },
+    });
+    res.status(200).json({ totalPrice: totalPrice / 100, priceId: price.id });
+  } catch (error) {
+    console.error('Errore durante la creazione del prezzo totale:', error);
+    res.status(500).json({ error: 'Errore durante la creazione del prezzo totale' });
+  }
+});
+
+// Endpoint per la conferma del pagamento
+app.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
+  const payload = req.body;
+  try {
+    const event = stripe.webhooks.constructEvent(payload, req.headers['stripe-signature'], 'whsec_8Oq7JaFYSfJJSKLLEgnWR6snr9qUH9xT');
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const { email, subject, text } = req.body;
+      const emailResponse = await sendEmail(mainTransporter, email, subject, text);
+      console.log('Risposta dall\'invio dell\'email:', emailResponse);
+    }
+    res.status(200).end();
+  } catch (error) {
+    console.error('Errore durante la gestione dell\'evento webhook:', error);
+    res.status(400).send('Errore durante la gestione dell\'evento webhook');
+  }
+});
+
+// Endpoint per il pagamento
+app.post('/process-payment', async (req, res) => {
+  try {
+    const { payment_method_id, amount, currency, email, subject, text, cartData, numeroOrdine } = req.body;
+
+    if (!cartData || !Array.isArray(cartData) || cartData.length === 0) {
+      return res.status(400).json({ error: 'Il carrello è vuoto o i dati non sono validi.' });
+    }
+
+    console.log('Creazione del paymentIntent con:', { payment_method_id, amount, currency, numeroOrdine });
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency,
+      payment_method: payment_method_id,
+      description: `Ordine numero: ${numeroOrdine}`,  // Aggiunta della descrizione con il numero d'ordine
+      confirm: true,
+      return_url: 'https://il_tuo_sito.com/payment-success',
+    });
+
+    console.log('paymentIntent creato:', paymentIntent);
+
+    if (paymentIntent.status === 'succeeded') {
+      console.log('Pagamento riuscito, invio email a:', email);
+
+      const emailResponse = await sendEmail(mainTransporter, email, subject, text);
+      console.log('Risposta dall\'invio dell\'email:', emailResponse);
+
+      res.status(200).json({ message: 'Pagamento completato con successo e email inviata!' });
+    } else {
+      console.error('Il pagamento non è stato completato con successo:', paymentIntent.status);
+      res.status(400).json({ error: 'Il pagamento non è stato completato con successo.' });
+    }
+  } catch (error) {
+    console.error('Errore durante il pagamento:', error.message);
+    res.status(500).json({ error: 'Errore durante il pagamento' });
+  }
+});
+
+// Endpoint per gestire l'invio delle email per reso/supporto
+app.post('/send-return-support-email', (req, res) => {
+  const { type, email, problem, orderNumber } = req.body;
+
+  if (!type || !email) {
+    return res.status(400).json({ error: 'Assicurati di specificare il tipo (reso o supporto) e l\'email.' });
+  }
+
+  let subject, text;
+  if (type === 'reso') {
+    subject = 'Richiesta di reso';
+    text = `Numero d'ordine: ${orderNumber}\nProblema: ${problem}`;
+  } else if (type === 'supporto') {
+    subject = 'Richiesta di supporto';
+    text = `Problema: ${problem}`;
+  } else {
+    return res.status(400).json({ error: 'Tipo non valido. Deve essere "reso" o "supporto".' });
+  }
+
+  const mailOptions = {
+    from: '#',
+    to: '#',
+    subject: subject,
+    text: text
+  };
+
+  returnSupportTransporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      console.error('Errore durante l\'invio dell\'email per reso/supporto:', error);
+      return res.status(500).json({ error: 'Errore durante l\'invio dell\'email per reso/supporto. Riprova più tardi.' });
+    } else {
+      console.log('Email per reso/supporto inviata con successo:', info.response);
+      return res.status(200).json({ message: 'Email per reso/supporto inviata con successo!' });
+    }
+  });
+});
+
+// Endpoint per gestire l'invio delle email di feedback
+app.post('/send-feedback-email', (req, res) => {
+  const { rating, comment } = req.body;
+
+  if (!rating || !comment) {
+    return res.status(400).json({ error: 'Assicurati di specificare il rating e il commento.' });
+  }
+
+  const mailOptions = {
+    from: '#',
+    to: '#',
+    subject: 'Nuovo feedback ricevuto',
+    text: `Rating: ${rating}\nCommento: ${comment}`
+  };
+
+  feedbackTransporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      console.error('Errore durante l\'invio dell\'email per il feedback:', error);
+      return res.status(500).json({ error: 'Errore durante l\'invio dell\'email per il feedback. Riprova più tardi.' });
+    } else {
+      console.log('Email per il feedback inviata con successo:', info.response);
+      return res.status(200).json({ message: 'Email per il feedback inviata con successo!' });
+    }
+  });
+});
+
+app.listen(port, () => {
+  console.log(`Server is running on port: ${port}`);
+});
+
+CLIENT JS CODE:
+
+// Variabile globale costante per il numero di ordine generato
+const numeroOrdine = generaNumeroOrdine();
+
+// Funzione per la generazione del numero di ordine univoco
+function generaNumeroOrdine() {
+    // Genera un numero di ordine univoco
+    var numeroOrdine = generaNumeroUnivoco();
+
+    // Memorizza il numero di ordine nel localStorage
+    var numeriOrdineMemorizzati = JSON.parse(localStorage.getItem("numeriOrdine")) || [];
+    numeriOrdineMemorizzati.push(numeroOrdine);
+    localStorage.setItem("numeriOrdine", JSON.stringify(numeriOrdineMemorizzati));
+
+    // Restituisci il numero di ordine generato
+    return numeroOrdine;
+}
+
+// Funzione per generare un numero di ordine univoco
+function generaNumeroUnivoco() {
+    var data = new Date();
+    var timestamp = data.getTime();
+    var randomId = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
+
+    return "ORD-" + timestamp + "-" + randomId;
+}
+
+// Funzione per lo scroll verso la sezione del carrello
+function scrollToCart() {
+    var carrelloSection = document.querySelector('.carrello-container');
+    carrelloSection.scrollIntoView({ behavior: 'smooth' });
+}
+
+// Funzione per la ricerca dei ricambi
+function searchCars() {
+    var input = document.getElementById('searchInput').value.toUpperCase();
+    var minPrice = parseFloat(document.getElementById('searchPriceMin').value);
+    var maxPrice = parseFloat(document.getElementById('searchPriceMax').value);
+    var brand = document.getElementById('searchBrand').value;
+    var modelDropdown = document.getElementById('searchModel');
+    var model = modelDropdown.value;
+    var type = document.getElementById('searchType').value;
+    var ricambi = document.getElementsByClassName('ricambio');
+
+    // Abilita il dropdown del modello solo se una marca è stata selezionata
+    modelDropdown.disabled = brand === '';
+
+    // Resetta le opzioni del dropdown del modello solo se la marca è stata cambiata
+    if (brand === '') {
+        resetModelDropdown();
+    }
+
+    for (var i = 0; i < ricambi.length; i++) {
+        var name = ricambi[i].getElementsByClassName('nome')[0].textContent.toUpperCase();
+        var priceText = ricambi[i].getElementsByClassName('prezzo')[0].textContent;
+        var ricambioPrice = parseFloat(priceText.split("€")[1]);
+        var ricambioBrand = ricambi[i].getAttribute('data-brand');
+        var ricambioModel = ricambi[i].getAttribute('data-model');
+        var ricambioType = ricambi[i].getAttribute('data-type');
+
+        if ((input === '' || name.indexOf(input) > -1) && 
+            ((isNaN(minPrice) && isNaN(maxPrice)) || 
+            (isNaN(minPrice) && ricambioPrice <= maxPrice) || 
+            (isNaN(maxPrice) && ricambioPrice >= minPrice) || 
+            (ricambioPrice >= minPrice && ricambioPrice <= maxPrice)) && 
+            (brand === '' || ricambioBrand === brand) && 
+            (model === '' || ricambioModel === model) && 
+            (type === '' || ricambioType === type)) {
+            ricambi[i].style.display = '';
+
+            // Aggiungi il modello al dropdown solo se corrisponde alla marca selezionata
+            if (brand !== '' && ricambioBrand === brand && modelDropdown.querySelector('option[value="' + ricambioModel + '"]') === null) {
+                var option = document.createElement('option');
+                option.text = ricambioModel;
+                option.value = ricambioModel;
+                modelDropdown.add(option);
+            }
+        } else {
+            ricambi[i].style.display = 'none';
+        }
+    }
+
+    // Allinea automaticamente i ricambi visibili
+    alignVisibleParts();
+}
+
+// Funzione per il reset dei filtri di ricerca
+function resetSearch() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('searchPriceMin').value = '';
+    document.getElementById('searchPriceMax').value = '';
+    document.getElementById('searchBrand').value = '';
+    resetModelDropdown();
+    document.getElementById('searchType').value = '';
+    searchCars(); // Richiama la funzione di ricerca per visualizzare tutti i ricambi
+}
+
+// Funzione per il reset del dropdown del modello
+function resetModelDropdown() {
+    var modelDropdown = document.getElementById('searchModel');
+    modelDropdown.innerHTML = '<option value="">Seleziona Modello</option>';
+    modelDropdown.disabled = true; // Disabilita il dropdown dopo il reset
+}
+
+// Aggiorna l'importo totale nel modulo di pagamento
+function updateTotalAmount() {
+    var totaleCarrello = parseFloat(document.getElementById('totaleCarrello').innerText.split('€')[1]);
+    document.getElementById('total-amount').textContent = '€' + totaleCarrello.toFixed(2);
+}
+
+// Variabile globale per il conteggio totale degli elementi nel carrello
+var conteggioTotaleCarrello = 0;
+
+// Funzione per l'aggiunta dei ricambi al carrello
+function aggiungiAlCarrello(nomeRicambio, prezzo) {
+    var carrello = document.getElementById('carrello');
+    var nuovoRicambio = carrello.querySelector('[data-nome="' + nomeRicambio + '"]');
+
+    if (nuovoRicambio) {
+        var quantitaNode = nuovoRicambio.querySelector('.quantita');
+        var quantita = parseInt(quantitaNode.getAttribute('data-quantity'));
+        var nuovoPrezzo = parseFloat(nuovoRicambio.getAttribute('data-prezzo'));
+        quantita++;
+        quantitaNode.textContent = 'Quantità: ' + quantita;
+        quantitaNode.setAttribute('data-quantity', quantita);
+        nuovoPrezzo += prezzo;
+        nuovoRicambio.setAttribute('data-prezzo', nuovoPrezzo.toFixed(2));
+    } else {
+        nuovoRicambio = document.createElement('div');
+        nuovoRicambio.innerHTML = nomeRicambio + ' - €' + prezzo.toFixed(2) + ' <span class="quantita" data-quantity="1">Quantità: 1</span>';
+        nuovoRicambio.className = 'ricambio-carrello';
+        nuovoRicambio.setAttribute('data-nome', nomeRicambio);
+        nuovoRicambio.setAttribute('data-prezzo', prezzo.toFixed(2));
+        var rimuoviButton = document.createElement('button');
+        rimuoviButton.innerHTML = 'Rimuovi';
+        rimuoviButton.className = 'rimuovi-carrello';
+        rimuoviButton.addEventListener('click', function() {
+            rimuoviDalCarrello(nuovoRicambio);
+        });
+        nuovoRicambio.appendChild(rimuoviButton);
+        carrello.appendChild(nuovoRicambio);
+    }
+
+    conteggioTotaleCarrello++; // Incrementa il conteggio totale degli elementi nel carrello
+    aggiornaConteggioElementi();
+    aggiornaTotaleCarrello();
+    updateTotalAmount(); // Aggiorna l'importo totale nel modulo di pagamento
+    updatePayButton();
+}
+
+// Funzione per la rimozione dei ricambi dal carrello e aggiornamento del totale
+function rimuoviDalCarrello(nuovoRicambio) {
+    var carrello = document.getElementById('carrello');
+    carrello.removeChild(nuovoRicambio);
+    var quantita = parseInt(nuovoRicambio.querySelector('.quantita').getAttribute('data-quantity'));
+    conteggioTotaleCarrello -= quantita; // Decrementa il conteggio totale degli elementi nel carrello in base alla quantità rimossa
+    aggiornaConteggioElementi(); // Aggiorna il conteggio degli elementi nel carrello
+    aggiornaTotaleCarrello(); // Aggiorna il totale del carrello
+    updateTotalAmount(); // Aggiorna l'importo totale nel modulo di pagamento
+    updatePayButton();
+}
+
+// Funzione per l'aggiornamento del conteggio degli elementi nel carrello
+function aggiornaConteggioElementi() {
+    var conteggioCarrello = document.getElementById('conteggioCarrello');
+    conteggioCarrello.innerHTML =  conteggioTotaleCarrello;
+}
+
+// Funzione per l'aggiornamento del totale del carrello
+function aggiornaTotaleCarrello() {
+    var carrelloItems = document.getElementsByClassName('ricambio-carrello');
+    var totale = 0;
+    for (var i = 0; i < carrelloItems.length; i++) {
+        var prezzo = parseFloat(carrelloItems[i].getAttribute('data-prezzo'));
+        totale += prezzo;
+    }
+    var totaleCarrello = document.getElementById('totaleCarrello');
+    totaleCarrello.innerHTML = 'Totale: €' + totale.toFixed(2);
+}
+
+// Funzione per allineare i ricambi visibili correttamente
+function alignVisibleParts() {
+    var ricambi = document.getElementsByClassName('ricambio');
+    for (var i = 0; i < ricambi.length; i++) {
+        if (ricambi[i].style.display !== 'none') {
+            ricambi[i].style.margin = '10px 0';
+        } else {
+            ricambi[i].style.margin = '0';
+        }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Aggiungi event listener per lo scroll verso la sezione del carrello
+    document.getElementById('scrollToCartButton').addEventListener('click', scrollToCart);
+
+    // Aggiungi event listener per l'aggiunta al carrello
+    var addToCartButtons = document.getElementsByClassName('aggiungi-carrello');
+    for (var i = 0; i < addToCartButtons.length; i++) {
+        addToCartButtons[i].addEventListener('click', function() {
+            var nomeRicambio = this.getAttribute('data-nome');
+            var prezzo = parseFloat(this.getAttribute('data-prezzo'));
+            aggiungiAlCarrello(nomeRicambio, prezzo);
+        });
+    }
+
+    // Aggiungi event listener per la ricerca dei ricambi
+    document.getElementById('searchInput').addEventListener('input', searchCars);
+    document.getElementById('searchPriceMin').addEventListener('input', searchCars);
+    document.getElementById('searchPriceMax').addEventListener('input', searchCars);
+    document.getElementById('searchBrand').addEventListener('change', searchCars);
+    document.getElementById('searchModel').addEventListener('change', searchCars);
+    document.getElementById('searchType').addEventListener('change', searchCars);
+
+    // Aggiungi event listener per il reset della ricerca
+    document.getElementById('resetSearch').addEventListener('click', resetSearch);
+});
+
+// Funzione per abilitare o disabilitare il pulsante "Paga Adesso" in base alla validità del form e allo stato del carrello - Ps. L'ho formalmente eliminata sostituendo .disabled con enabled
+
+function updatePayButton() {
+    const payButton = document.getElementById('submit');
+    const paymentDetailsFilled = isPaymentDetailsFilled(); // Verifica se i dettagli di pagamento sono stati inseriti
+
+    payButton.enabled = !(isFormValid() && paymentDetailsFilled);
+}
+
+// Funzione per verificare se sono stati inseriti i dettagli di pagamento
+function isPaymentDetailsFilled() {
+    const cardElementComplete = document.querySelector('.StripeElement iframe[title="Secure payment input frame"]'); // Verifica se l'iframe del campo della carta è stato caricato correttamente
+    return cardElementComplete && cardElementComplete.getAttribute('aria-hidden') === 'false'; // Verifica se l'iframe del campo della carta è visibile
+}
+
+// Funzione per verificare se il form è compilato correttamente e il carrello contiene almeno un articolo
+function isFormValid() {
+    const name = document.getElementById('name').value.trim();
+    const email = document.getElementById('email').value.trim();
+    const address = document.getElementById('address').value.trim();
+    const city = document.getElementById('city').value.trim();
+    const zip = document.getElementById('zip').value.trim();
+
+    const formFilled = name && email && address && city && zip;
+    const cartNotEmpty = document.querySelectorAll('.ricambio-carrello').length > 0;
+
+    return formFilled && cartNotEmpty;
+}
+
+// Aggiorna lo stato del pulsante al caricamento della pagina e aggiungi event listener per il cambio di input nel form
+window.addEventListener('DOMContentLoaded', function () {
+    updatePayButton();
+    document.querySelectorAll('#name, #email, #address, #city, #zip').forEach(input => {
+        input.addEventListener('input', updatePayButton);
+    });
+
+    // Aggiungi un ulteriore event listener per il cambio di input nel carrello
+    const cartItems = document.querySelectorAll('.ricambio-carrello');
+    cartItems.forEach(item => {
+        item.addEventListener('input', updatePayButton);
+    });
+});
+
+// Funzione per inviare i dati del form di checkout e del carrello al server
+async function sendData(numeroOrdine) {
+    const formData = {
+        name: document.getElementById('name').value.trim(),
+        email: document.getElementById('email').value.trim(),
+        address: document.getElementById('address').value.trim(),
+        city: document.getElementById('city').value.trim(),
+        zip: document.getElementById('zip').value.trim(),
+    };
+
+    const cartItems = document.querySelectorAll('.ricambio-carrello');
+    const cartData = Array.from(cartItems).map(item => ({
+        nome: item.getAttribute('data-nome'),
+        prezzo: parseFloat(item.getAttribute('data-prezzo'))
+    }));
+
+    const data = {
+        formData: formData,
+        cartData: cartData,
+        numeroOrdine: numeroOrdine
+    };
+
+    try {
+        const response = await fetch('https://pagamenti.southgardamotorsport.it/send-cart-data', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            const responseData = await response.json();
+            console.log(responseData);
+        } else {
+            throw new Error('Errore durante l\'invio dei dati');
+        }
+    } catch (error) {
+        console.error('Errore durante l\'invio dei dati:', error);
+    }
+}   
+ 
+document.addEventListener('DOMContentLoaded', function() {       
+    // Inizializzazione di Stripe e creazione dell'elemento della carta
+    var stripe = Stripe('pk_test_51P3Fwy2LjY6C0IpzQVWIp9zfPbkh0n591sKK0vrqf9i9bSQl1FREqyVdSvBMvMGIC4uYPtziBgZDTYuf0N3q9BHJ00qQuElydm');
+    var elements = stripe.elements();
+    var cardElement = elements.create('card');
+    cardElement.mount('#card-element');
+
+    // Funzione per mostrare l'avviso di caricamento e avviare l'animazione
+    function showLoadingIndicator() {
+        // Mostra l'avviso di caricamento
+        var loadingOverlay = document.getElementById('loading-overlay');
+        loadingOverlay.style.display = 'block'; // Assicurati che l'elemento sia visibile
+    }
+
+    // Event listener per il click sul pulsante di pagamento
+    document.getElementById('submit').addEventListener('click', async function(event) {
+        event.preventDefault();
+
+        // Verifica se il form è valido
+        if (!isFormValid() || this.disabled) {
+            showIncompleteFormAlert();
+            return;
+        }
+
+        showLoadingIndicator(); // Mostra il caricamento
+
+        var name = document.getElementById('name').value.trim();
+        var email = document.getElementById('email').value.trim();
+        var totaleCarrello = parseFloat(document.getElementById('totaleCarrello').innerText.split('€')[1]);
+
+        try {
+            const result = await stripe.createPaymentMethod({
+                type: 'card',
+                card: cardElement,
+                billing_details: {
+                    name: name,
+                    email: email,
+                },
+            });
+
+            if (result.error) {
+                console.error('Errore durante la creazione del pagamento:', result.error);
+                alert('Si è verificato un errore durante la creazione del pagamento. Riprova più tardi.');
+                return;
+            }
+
+            const paymentResponse = await fetch('https://pagamenti.southgardamotorsport.it/process-payment', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    payment_method_id: result.paymentMethod.id,
+                    amount: totaleCarrello * 100, // Converti l'importo in centesimi
+                    currency: 'eur',
+                    description: `Ordine numero: ${numeroOrdine}`, // Aggiungi la descrizione con il numero d'ordine
+                    email: email,
+                    subject: 'Conferma di pagamento',
+                    text: `Grazie per il tuo ordine! Il numero d'ordine è: ${numeroOrdine}`,
+                    cartData: Array.from(document.querySelectorAll('.ricambio-carrello')).map(item => ({
+                        nome: item.getAttribute('data-nome'),
+                        prezzo: parseFloat(item.getAttribute('data-prezzo'))
+                    }))
+                }),
+            });
+
+            if (paymentResponse.ok) {
+                // Pagamento completato con successo
+                alert('Pagamento completato con successo!');
+                // Reindirizza l'utente alla pagina di ringraziamento
+                window.location.href = 'completato.html';
+                sendData(numeroOrdine); // Invia i dati del carrello al server
+            } else {
+                // Pagamento non riuscito
+                alert('Si è verificato un problema durante il pagamento. Riprova più tardi.');
+                // Reindirizza l'utente alla pagina di errore
+                window.location.href = 'fallito.html';
+            }
+        } catch (error) {
+            console.error('Errore durante il pagamento:', error);
+            // Gestisci l'errore
+            alert('Si è verificato un errore durante il pagamento. Riprova più tardi.');
+            // Reindirizza l'utente alla pagina di errore
+            window.location.href = 'fallito.html';
+        }
+    });
+
+    // Chiamata alla funzione per aggiornare l'importo totale iniziale
+    updateTotalAmount();
+
+    // Aggiungi un event listener alla selezione della marca
+    document.getElementById('searchBrand').addEventListener('change', function() {
+        searchCars(); // Richiama la funzione di ricerca quando viene selezionata una marca
+    });
+        
+    // Funzione per visualizzare un avviso se il form non è completo o il carrello è vuoto
+    function showIncompleteFormAlert() {
+        alert('Completa il form e assicurati che il carrello contenga almeno un articolo.');
+    }
+});
